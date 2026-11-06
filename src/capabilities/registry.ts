@@ -1,4 +1,6 @@
 import type { Tool } from 'ai';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { trackTools, withToolExecutionScope } from './tool-execution-scope.js';
 import { ensurePinnedBinaries } from './shell/argv-lane.js';
 import { PermissionManager } from './permissions.js';
 import { createReadFileTool } from './filesystem/read-file.js';
@@ -105,6 +107,7 @@ export class CapabilityRegistry {
   private sendMessageHandler?: (content: string) => Promise<void>;
   private chatCommandContext?: ChatCommandContext;
   private currentCwd = process.cwd();
+  private readonly executionContext = new AsyncLocalStorage<{ cwd: string; toolsDisabled: boolean }>();
   private researchModeGetter: (() => boolean) | null = null;
   private mcp?: McpManager;
 
@@ -189,19 +192,34 @@ export class CapabilityRegistry {
    * the plan and narration-guard paths, gets none.
    */
   setToolsDisabled(disabled: boolean): void {
-    this.toolsDisabled = disabled;
+    const context = this.executionContext.getStore();
+    if (context) context.toolsDisabled = disabled;
+    else this.toolsDisabled = disabled;
   }
 
   areToolsDisabled(): boolean {
-    return this.toolsDisabled;
+    return this.executionContext.getStore()?.toolsDisabled ?? this.toolsDisabled;
   }
 
   getCwd(): string {
+    return this.executionContext.getStore()?.cwd ?? this.currentCwd;
+  }
+
+  /** Baseline for a newly dispatched session, independent of the caller's turn. */
+  getDefaultCwd(): string {
     return this.currentCwd;
   }
 
   setCwd(dir: string): void {
-    this.currentCwd = dir;
+    const context = this.executionContext.getStore();
+    if (context) context.cwd = dir;
+    else this.currentCwd = dir;
+  }
+
+  /** Isolate mutable tool state and wait for admitted tools before releasing a turn. */
+  async withExecutionContext<T>(fn: () => T | PromiseLike<T>, options: { signal?: AbortSignal; cwd?: string; toolsDisabled?: boolean } = {}): Promise<T> {
+    const context = { cwd: options.cwd ?? this.getCwd(), toolsDisabled: options.toolsDisabled ?? this.areToolsDisabled() };
+    return this.executionContext.run(context, () => withToolExecutionScope(fn, options));
   }
 
   setSendFileHandler(handler: (filePath: string, channel?: string) => Promise<void>): void {
@@ -349,12 +367,12 @@ export class CapabilityRegistry {
   }
 
   getTools(): Record<string, Tool> {
-    if (this.toolsDisabled) return {};
+    if (this.areToolsDisabled()) return {};
     // Scheduled calls (when a calling channel plugin is running): owner only.
     if (this.permissions.getCurrentSenderRole() !== 'member' && activeCallScheduler()) {
-      return this.filterSessionTools({ ...this.getToolsInner(), ...callTools() });
+      return trackTools(this.filterSessionTools({ ...this.getToolsInner(), ...callTools() }));
     }
-    return this.filterSessionTools(this.getToolsInner());
+    return trackTools(this.filterSessionTools(this.getToolsInner()));
   }
 
   private getToolsInner(): Record<string, Tool> {
@@ -390,7 +408,7 @@ export class CapabilityRegistry {
 
   /** Return tools filtered for plan mode — read-only tools only */
   getPlanTools(): Record<string, Tool> {
-    if (this.toolsDisabled) return {};
+    if (this.areToolsDisabled()) return {};
     const blocked = new Set([
       'write_file', 'create_file', 'delete_file', 'edit_file',
       'run_command', 'cd',
@@ -403,8 +421,8 @@ export class CapabilityRegistry {
       if (!blocked.has(name)) filtered[name] = tool;
     }
     // Plan mode: only plugin tools their manifest declares read-only.
-    if (this.permissions.getCurrentSenderRole() === 'member') return this.filterSessionTools(filtered);
-    return this.filterSessionTools(this.withPluginTools(filtered, true));
+    if (this.permissions.getCurrentSenderRole() === 'member') return trackTools(this.filterSessionTools(filtered));
+    return trackTools(this.filterSessionTools(this.withPluginTools(filtered, true)));
   }
 
   getToolNames(): string[] {
