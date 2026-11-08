@@ -18,6 +18,7 @@ const { setPluginImagesAllowed } = await import('../../plugins/tool-bridge.js');
 const { resolveChildTools } = await import('../../utils/tool-filter.js');
 const { filterBotTools } = await import('../../bots/registry-factory.js');
 const { WebChannel } = await import('../../channels/web.js');
+const { withToolExecutionScope } = await import('../tool-execution-scope.js');
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 
 function setup(seesImages = true) {
@@ -132,5 +133,34 @@ describe('browser tool approval, identity and image ownership', () => {
     const [first, second] = await Promise.all([execute(a.tools.browser_snapshot!), execute(b.tools.browser_snapshot!)]);
     expect(JSON.stringify(await output(a.tools.browser_snapshot!, first))).toContain('private-image-a');
     expect(JSON.stringify(await output(b.tools.browser_snapshot!, second))).toContain('private-image-b');
+  });
+
+  it('uses each concurrent turn’s image capability when another provider initializes before tool construction', async () => {
+    const a = setup(false);
+    const b = setup(true);
+    let announceA!: () => void;
+    let announceB!: () => void;
+    const aReady = new Promise<void>((resolve) => { announceA = resolve; });
+    const bReady = new Promise<void>((resolve) => { announceB = resolve; });
+    const [textOnly, vision] = await Promise.all([
+      withToolExecutionScope(async () => {
+        setPluginImagesAllowed(false);
+        announceA();
+        await bReady;
+        const tools = createBrowserTools(a.permissions, a.reader);
+        const value = await execute(tools.browser_snapshot!);
+        return output(tools.browser_snapshot!, value);
+      }),
+      withToolExecutionScope(async () => {
+        await aReady;
+        setPluginImagesAllowed(true);
+        announceB();
+        const tools = createBrowserTools(b.permissions, b.reader);
+        const value = await execute(tools.browser_snapshot!);
+        return output(tools.browser_snapshot!, value);
+      }),
+    ]);
+    expect(JSON.stringify(textOnly)).not.toContain('image-data');
+    expect(JSON.stringify(vision)).toContain('private-image-a');
   });
 });
