@@ -29,6 +29,8 @@ export interface PermissionContext {
   readonly channelId: string;
   /** Canonical repository session, supplied by the agent, never tool arguments. */
   readonly sessionId?: string;
+  /** External event turns neither consume nor create remembered conversation approvals. */
+  readonly rememberApprovals: boolean;
   readonly senderRole: 'admin' | 'member' | undefined;
   /** Allow-all: approved-scope actions and non-blocked commands run without prompts. */
   readonly autoApprove: boolean;
@@ -56,6 +58,7 @@ export function makeContext(fields: Partial<PermissionContext> = {}): Permission
     channelId: fields.channelId ?? 'cli',
     ...(fields.sessionId ? { sessionId: fields.sessionId } : {}),
     senderRole: fields.senderRole,
+    rememberApprovals: fields.rememberApprovals ?? true,
     autoApprove: fields.autoApprove ?? false,
     autoApproveOrigin: fields.autoApprove ? (fields.autoApproveOrigin ?? 'session') : null,
     allowedTools: fields.allowedTools ? Object.freeze([...fields.allowedTools]) : undefined,
@@ -122,6 +125,7 @@ export function deriveChildContext(parent: PermissionContext, req: ChildContextR
     channelType: req.channelType ?? parent.channelType,
     channelId: req.channelId ?? parent.channelId,
     senderRole: parent.senderRole,
+    rememberApprovals: parent.rememberApprovals,
     autoApprove: inheritAllow,
     autoApproveOrigin: inheritAllow ? 'session' : null,
     allowedTools,
@@ -133,6 +137,7 @@ export function deriveChildContext(parent: PermissionContext, req: ChildContextR
 /** True when `child` grants nothing `parent` does not (used by tests and assertions). */
 export function isSubsetContext(child: PermissionContext, parent: PermissionContext): boolean {
   if (child.autoApprove && !parent.autoApprove) return false;
+  if (child.rememberApprovals && !parent.rememberApprovals) return false;
   if (parent.allowedTools) {
     if (!child.allowedTools) return false;
     if (child.allowedTools.some((t) => !parent.allowedTools!.includes(t))) return false;
