@@ -247,7 +247,7 @@ describe('authenticated event → durable Agent work → real tool loop', () => 
     const outcome = diskFailure ? 'paused' : 'cancelled';
     await waitForOutcome(harness, outcome);
     expect(existsSync(target)).toBe(false);
-    expect(harness.capabilities.toolLog.every((entry) => /denied|stopped|cancel/i.test(entry.output))).toBe(true);
+    expect(harness.capabilities.toolLog.every((entry) => /denied|stopped|cancel/i.test(String(entry.output)))).toBe(true);
     expect(harness.capabilities.permissions.drainAnswers()).toEqual([]);
     const calls = harness.providers[0].callCount;
     expect(await (await post()).json()).toMatchObject({ accepted: false, delivery: { status: outcome } });
