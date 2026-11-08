@@ -461,9 +461,8 @@ function ChatInput({
         </div>
         <Button
           size="icon"
-      return true;
-    } catch (err) {
-      if (!selected()) return false;
+          aria-label="Send"
+          disabled={disabled || sending || (!text.trim() && files.length === 0)}
           onClick={handleSubmit}
           className="h-10 w-10 shrink-0 rounded-xl"
         >
