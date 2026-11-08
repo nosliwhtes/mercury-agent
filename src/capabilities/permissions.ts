@@ -818,7 +818,7 @@ export class PermissionManager {
           }
           const answer = await this.askHandler(`Write hard-linked file: ${canonical}\n(${nlink} links — this also changes every alias, including any outside the approved scopes)`);
           if (answer !== 'yes' && answer !== 'always') return { allowed: false, reason, code: 'hardlink', canonical };
-          if (answer === 'always') {
+          if (answer === 'always' && ctx.rememberApprovals) {
             const aliases = approved ?? new Set<string>();
             aliases.add(canonical);
             this.approvedHardlinkWritesByContext.set(channelId, aliases);
