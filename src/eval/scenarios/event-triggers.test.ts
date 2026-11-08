@@ -226,7 +226,12 @@ describe('authenticated event → durable Agent work → real tool loop', () => 
 
   it.each([false, true])('rejects a late Always answer after this chat is stopped (disk failure: %s)', async (diskFailure) => {
     const { harness, post, session } = await setup(true);
-    const target = join(harness.workDir, 'late-approval.txt');
+    // Reach the approval boundary even when the OS temp directory is an
+    // alias; external events correctly discard the harness's temporary grants.
+    const scope = join(dirname(harness.workDir), 'approved-work');
+    symlinkSync(harness.workDir, scope, process.platform === 'win32' ? 'junction' : 'dir');
+    harness.capabilities.permissions.getManifest().capabilities.filesystem.scopes = [{ path: scope, read: true, write: true }];
+    const target = join(scope, 'late-approval.txt');
     let answer!: (value: string) => void;
     const approval = new Promise<string>((resolve) => { answer = resolve; });
     const ask = vi.fn(() => approval);
