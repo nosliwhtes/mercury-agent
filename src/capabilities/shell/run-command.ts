@@ -25,6 +25,8 @@ interface ExecResult {
 }
 
 interface ExecOptions {
+  /** Validated applet name, kept separate from the canonical executable path. */
+  argv0?: string;
   /** Abort from the agent loop; the child is terminated when it fires. */
   signal?: AbortSignal;
   /** Called on output and periodically while the child is alive. */
@@ -47,12 +49,13 @@ export function executeCommand(command: string, cwd: string, timeoutMs: number, 
 
 /**
  * Argv-lane executor: the pinned absolute binary and literal arguments, with
- * no shell and a minimal environment. spawn exposes POSIX process groups;
- * execFile does not forward detached and buffers another copy of all output.
+ * no shell and a minimal environment. spawn supports POSIX process groups and
+ * forwards argv0 so canonical multicall binaries select the validated applet.
  */
 export function executeArgv(file: string, args: readonly string[], cwd: string, timeoutMs: number, options: ExecOptions = {}): Promise<ExecResult> {
   return superviseChild(() => spawn(file, [...args], {
     cwd,
+    argv0: options.argv0,
     env: minimalEnv(),
     shell: false,
     detached: process.platform !== 'win32',
@@ -250,7 +253,7 @@ The optional timeout parameter sets how long (in seconds) the command can run be
         logger.info({ cmd: command, cwd, timeoutMs, lane: plan ? 'argv' : 'shell' }, 'Executing command');
         const execOptions = { signal: toolOptions?.abortSignal, onActivity: pulseProgress };
         const result = plan
-          ? await executeArgv(plan.file, plan.args, cwd, timeoutMs, execOptions)
+          ? await executeArgv(plan.file, plan.args, cwd, timeoutMs, { ...execOptions, argv0: plan.argv[0] })
           : await executeCommand(command, cwd, timeoutMs, execOptions);
 
         if (result.stdout || result.stderr) {

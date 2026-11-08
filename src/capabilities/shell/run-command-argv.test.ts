@@ -4,7 +4,7 @@ import { PassThrough } from 'node:stream';
 
 /**
  * Argv-lane execution: an auto-approved command must run through
- * spawn(absBinary, argv, { shell: false, env: minimal }) — never a shell.
+ * the canonical binary with literal argv and a minimal env — never a shell.
  */
 vi.mock('node:child_process', () => {
   const fakeChild = (stdoutText: string) => {
@@ -44,12 +44,12 @@ function fakePermissions(result: { allowed: boolean; lane?: 'argv' | 'shell'; re
 beforeEach(() => {
   vi.mocked(execFile).mockClear();
   vi.mocked(spawn).mockClear();
-  setPinnedBinariesForTest({ cat: '/usr/bin/cat', git: '/usr/bin/git', ls: '/bin/ls' });
+  setPinnedBinariesForTest({ cat: '/usr/bin/coreutils', git: '/usr/bin/git', ls: '/bin/ls' });
   process.env.SUPER_SECRET_TOKEN = 'do-not-leak';
 });
 
 describe('run_command argv lane', () => {
-  it('executes an auto-approved command with the pinned absolute binary, literal argv and a minimal env', async () => {
+  it('executes an auto-approved command with the canonical binary, original applet and a minimal env', async () => {
     const permissions = fakePermissions({ allowed: true, lane: 'argv' });
     const tool = createRunCommandTool(permissions, () => '/work', () => {});
     const out = await run(tool, { command: 'cat "my file.txt" other' });
@@ -58,10 +58,11 @@ describe('run_command argv lane', () => {
     expect(execFile).not.toHaveBeenCalled();
     expect(spawn).toHaveBeenCalledTimes(1);
     const [file, args, opts] = vi.mocked(spawn).mock.calls[0] as unknown as [string, string[], any];
-    expect(file).toBe('/usr/bin/cat');
+    expect(file).toBe('/usr/bin/coreutils');
     expect(args).toEqual(['my file.txt', 'other']);
     expect(opts.cwd).toBe('/work');
     expect(opts.shell).toBe(false);
+    expect(opts.argv0).toBe('cat');
     expect(opts.env.PATH).toBe(pinnedPath());
     expect(opts.env.SUPER_SECRET_TOKEN).toBeUndefined();
     expect(permissions.checkShellCommand).toHaveBeenCalledWith('cat "my file.txt" other', { cwd: '/work' });
@@ -71,8 +72,9 @@ describe('run_command argv lane', () => {
     const tool = createRunCommandTool(fakePermissions({ allowed: true, lane: 'shell' }), () => '/work', () => {});
     await run(tool, { command: 'git log --oneline' });
     expect(execFile).not.toHaveBeenCalled();
-    const [file, args, opts] = vi.mocked(spawn).mock.calls[0] as unknown as [string, string[], { shell: boolean }];
+    const [file, args, opts] = vi.mocked(spawn).mock.calls[0] as unknown as [string, string[], { shell: boolean; argv0: string }];
     expect(opts.shell).toBe(false);
+    expect(opts.argv0).toBe('git');
     expect(file).toBe('/usr/bin/git');
     expect(args.slice(-1)).toEqual(['--oneline']);
     expect(args).toContain('core.fsmonitor=false');
@@ -86,6 +88,7 @@ describe('run_command argv lane', () => {
     const [cmd, , opts] = vi.mocked(spawn).mock.calls[0] as unknown as [string, string[], any];
     expect(cmd).toBe('git log | head -5');
     expect(opts.shell).toBe(true);
+    expect(opts.argv0).toBeUndefined();
   });
 
   it('never falls back to a shell for an argv-lane approval it cannot execute directly', async () => {
