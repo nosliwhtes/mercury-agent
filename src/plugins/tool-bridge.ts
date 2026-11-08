@@ -97,6 +97,9 @@ export function setPluginImagesAllowed(allowed: boolean): void {
   if (scope) scopedImages.set(scope, state);
   else fallbackImageState = state;
 }
+
+/** Capture once when constructing tools for the current provider request. */
+export function currentToolImagesAllowed(): boolean { return imageState().imagesAllowed; }
 const MAX_PENDING = 32;
 
 function holdImages(state: ImageState, callId: string, images: PluginImage[]): void {
