@@ -1262,7 +1262,7 @@ export class PermissionManager {
       { alwaysAsk: true },
     );
     if (signal?.aborted) return { allowed: false, reason: 'MCP resource request was cancelled' };
-    if (answer === 'always') {
+    if (answer === 'always' && ctx.rememberApprovals) {
       const approved = this.approvedMcpResourcesByContext.get(channel) ?? new Set<string>();
       approved.add(key);
       this.approvedMcpResourcesByContext.set(channel, approved);
