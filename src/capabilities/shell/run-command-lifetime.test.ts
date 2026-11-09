@@ -77,11 +77,41 @@ describe('command output lifetime', () => {
   it('collects descendant output after the direct child has exited', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mercury-command-drain-'));
     roots.push(root);
-    const source = `require('node:child_process').spawn(process.execPath, ['-e', "setTimeout(() => console.log('tail after parent exit'), 150)"], { stdio: ['ignore', 'inherit', 'inherit'] }); process.exit(0);`;
-    const result = await executeArgv(process.execPath, ['-e', source], root, 5000);
-    expect(result).toMatchObject({ exitCode: 0, timedOut: false, aborted: false });
+    const script = join(root, 'drain.cjs');
+    writeFileSync(script, `
+      const { spawn } = require('node:child_process');
+      if (process.argv[2] !== 'descendant') {
+        const child = spawn(process.execPath, [__filename, 'descendant', String(process.pid)], {
+          stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+        });
+        child.once('error', () => process.exit(1));
+        // In particular on Windows, do not tear down the parent before the
+        // descendant has initialized and flushed its inherited stdout handle.
+        child.once('message', () => process.exit(0));
+      } else {
+        const parentPid = Number(process.argv[3]);
+        const deadline = Date.now() + 5000;
+        const afterParentExit = () => {
+          try { process.kill(parentPid, 0); }
+          catch (error) {
+            if (error.code === 'ESRCH') {
+              process.stdout.write('tail after parent exit\\n');
+              return;
+            }
+            throw error;
+          }
+          if (Date.now() >= deadline) throw new Error('Parent did not exit');
+          setTimeout(afterParentExit, 10);
+        };
+        process.once('disconnect', afterParentExit);
+        process.stdout.write('descendant ready\\n', () => process.send('ready'));
+      }
+    `);
+    const result = await executeArgv(process.execPath, [script], root, 10_000);
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false, aborted: false, stderr: '' });
+    expect(result.stdout).toContain('descendant ready');
     expect(result.stdout).toContain('tail after parent exit');
-  });
+  }, 15_000);
 });
 
 describe.skipIf(process.platform !== 'win32')('native Windows command trees', () => {
