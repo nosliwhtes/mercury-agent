@@ -72,11 +72,12 @@ export const chat = {
   threads: () => http.get<{ threads: ChatThread[] }>("/api/chat/threads"),
   thread: (id: string) => http.get<ChatThread>(`/api/chat/threads/${encodeURIComponent(id)}`),
   createThread: (title?: string) => http.post<ChatThread>("/api/chat/threads", { title }),
+  renameThread: (id: string, title: string) => http.put<{ id: string; title: string }>(`/api/chat/threads/${encodeURIComponent(id)}/title`, { title }),
   deleteThread: (id: string) => http.post<{ deleted: boolean }>(`/api/chat/threads/${encodeURIComponent(id)}/delete`, { confirmSessionId: id }),
   send: (content: string, sessionId?: string, attachments?: Array<{ name: string; data: string }>, code?: { programming: string; cwd?: string }) =>
     http.post<{ sent: boolean; sessionId: string }>("/api/chat/send", { content, sessionId, ...(attachments?.length ? { attachments } : {}), ...(code ?? {}) }),
-  /** Interrupt the running turn (same as /stop). Needs the "chat.stop" feature. */
-  stop: () => http.post<{ ok: boolean; note?: string }>("/api/chat/stop", {}),
+  /** Interrupt only this conversation. Needs the "chat.stop" feature. */
+  stop: (sessionId: string) => http.post<{ ok: boolean; note?: string }>("/api/chat/stop", { sessionId }),
   /** Take back your last message and the reply (stop the turn first); returns your text. */
   save: (threadId: string, saved: boolean) => http.post<{ id: string; saved: boolean; savedAt: string | null }>(`/api/chat/threads/${encodeURIComponent(threadId)}/save`, { saved }),
   undo: (threadId: string, content: string) => http.post<{ ok: boolean; content: string; removed: number }>(`/api/chat/threads/${encodeURIComponent(threadId)}/undo`, { content }),

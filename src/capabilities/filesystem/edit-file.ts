@@ -1,10 +1,12 @@
 import { tool, zodSchema } from 'ai';
 import { z } from 'zod';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve, isAbsolute } from 'node:path';
+import { readFileSync, ftruncateSync, writeSync, closeSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { PermissionManager } from '../permissions.js';
+import { resolveToolPath, type CwdSource } from './resolve-path.js';
+import { openVerifiedWrite } from './verified-write.js';
 
-export function createEditFileTool(permissions: PermissionManager, getCwd: () => string) {
+export function createEditFileTool(permissions: PermissionManager, getCwd: CwdSource) {
   return tool({
     description: 'Edit a file by replacing an exact string match with new content. Use this instead of write_file when you only need to change part of a file. The old_string must match exactly (including whitespace and indentation). Fails if old_string is not found or found multiple times.',
     inputSchema: zodSchema(z.object({
@@ -13,16 +15,20 @@ export function createEditFileTool(permissions: PermissionManager, getCwd: () =>
       new_string: z.string().describe('The text to replace it with'),
     })),
     execute: async ({ path, old_string, new_string }) => {
-      const resolved = isAbsolute(path) ? resolve(path) : resolve(getCwd(), path);
+      const resolved = resolveToolPath(path, getCwd);
 
       const fsCheck = await permissions.checkFsAccess(resolved, 'write');
       if (!fsCheck.allowed) {
+        if (fsCheck.code === 'hardlink') return `Error: ${fsCheck.reason}`;
         const parentDir = resolve(resolved, '..');
         return `Error: Permission denied for write access to ${resolved}. Use the approve_scope tool with path="${parentDir}" and mode="write" to request access from the user.`;
       }
 
+      const opened = openVerifiedWrite(fsCheck, resolved, true);
+      if (opened.error !== undefined) return opened.error;
+      const { fd } = opened;
       try {
-        const content = readFileSync(resolved, 'utf-8');
+        const content = readFileSync(fd, 'utf-8');
 
         const count = content.split(old_string).length - 1;
         if (count === 0) {
@@ -33,7 +39,10 @@ export function createEditFileTool(permissions: PermissionManager, getCwd: () =>
         }
 
         const newContent = content.replace(old_string, new_string);
-        writeFileSync(resolved, newContent, 'utf-8');
+        const bytes = Buffer.from(newContent, 'utf-8');
+        ftruncateSync(fd, 0);
+        let offset = 0;
+        while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset, offset);
 
         const linesAdded = new_string.split('\n').length;
         const linesRemoved = old_string.split('\n').length;
@@ -43,6 +52,8 @@ export function createEditFileTool(permissions: PermissionManager, getCwd: () =>
           return `Error: File not found: ${path}. Use create_file to create new files.`;
         }
         return `Error editing file: ${err.message}`;
+      } finally {
+        closeSync(fd);
       }
     },
   });

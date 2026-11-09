@@ -96,8 +96,11 @@ import { runWithWatchdog } from './cli/watchdog.js';
 import { setGitHubToken } from './utils/github.js';
 import { selectWithArrowKeys } from './utils/arrow-select.js';
 import { ProviderModelFetchError, fetchProviderModelCatalog } from './utils/provider-models.js';
+import { withBaseUrl } from './providers/basic-auth.js';
 import { initCloudTokenStore } from './cloud/token-store.js';
 import { clearCloudRuntimeOnline, markCloudRuntimeOnline } from './cloud/runtime-status.js';
+import { loadEventTriggers } from './core/event-triggers.js';
+import { configureEventTriggers } from './web/api/event-triggers.js';
 import { startWebServer, stopWebServer, updateStatus as updateWebStatus, setUserMemory as setWebUserMemory, setWebChannel as setWebWebChannel, setScheduler as setWebScheduler, setAgentSupervisor as setWebSupervisor, setBackgroundTaskManager as setWebBgTasks, setSpotifyClient as setWebSpotify, setProgrammingMode as setWebProgrammingMode, setModelSwitchCallback as setWebModelSwitch, setCurrentProviderCallback as setWebCurrentProvider, setStatusSnapshotCallback as setWebStatusSnapshot, setKanbanSupervisor as setWebKanban, setKanbanBoardManager as setWebBoardManager, setKanbanProviders as setWebKanbanProviders, setIDEProviders as setWebIDEProviders, setSessionRepository as setWebSessions, setSessionSyncEnabledCallback as setWebSessionSyncEnabled, setBotManager as setWebBotManager, setBotsWebhookSecret, setShutdownHandler, setMcpManager as setWebMcpManager, setStopCallback as setWebStop, setSessionBusyLookup as setWebSessionBusy, setQueueControls as setWebQueueControls, setResearchControls as setWebResearchControls, setBudgetControls as setWebBudgetControls } from './web/server.js';
 import { validateApiKey, validateBaseUrl, validateModelName } from './providers/provider-meta.js';
 import { setFirstProviderHandler, setProvidersReload } from './web/api/providers.js';
@@ -206,6 +209,7 @@ const PROVIDER_OPTIONS: Array<{ key: ProviderName; label: string }> = [
   { key: 'grok', label: 'Grok (xAI)' },
   { key: 'atlascloud', label: 'Atlas Cloud' },
   { key: 'runcrate', label: 'Runcrate' },
+  { key: 'cloudgpu', label: 'CloudGPU' },
   { key: 'ollamaCloud', label: 'Ollama Cloud' },
   { key: 'ollamaLocal', label: 'Ollama Local' },
   { key: 'atomicChat', label: 'Atomic Chat' },
@@ -468,10 +472,7 @@ async function promptOllamaLocalModelSelection(config: MercuryConfig, isReconfig
 
   console.log(chalk.dim('  Fetching Ollama Local models...'));
   try {
-    const catalog = await fetchProviderModelCatalog('ollamaLocal', {
-      ...existingConfig,
-      baseUrl,
-    });
+    const catalog = await fetchProviderModelCatalog('ollamaLocal', withBaseUrl(existingConfig, baseUrl));
     const model = await chooseProviderModel(
       'Ollama Local',
       catalog.recommendedModel,
@@ -526,10 +527,7 @@ async function promptLmStudioModelSelection(config: MercuryConfig, isReconfig: b
 
   console.log(chalk.dim('  Fetching LM Studio models...'));
   try {
-    const catalog = await fetchProviderModelCatalog('lmStudio', {
-      ...existingConfig,
-      baseUrl,
-    });
+    const catalog = await fetchProviderModelCatalog('lmStudio', withBaseUrl(existingConfig, baseUrl));
     const model = await chooseProviderModel(
       'LM Studio',
       catalog.recommendedModel,
@@ -585,10 +583,7 @@ async function promptAtomicChatModelSelection(config: MercuryConfig, isReconfig:
 
   console.log(chalk.dim('  Fetching Atomic Chat models...'));
   try {
-    const catalog = await fetchProviderModelCatalog('atomicChat', {
-      ...existingConfig,
-      baseUrl,
-    });
+    const catalog = await fetchProviderModelCatalog('atomicChat', withBaseUrl(existingConfig, baseUrl));
     const model = await chooseProviderModel(
       'Atomic Chat',
       catalog.recommendedModel,
@@ -637,8 +632,7 @@ async function promptOpenAICompatSetup(config: MercuryConfig, isReconfig: boolea
   console.log(chalk.dim('  Fetching models from server...'));
   try {
     const catalog = await fetchProviderModelCatalog('openaiCompat', {
-      ...existingConfig,
-      baseUrl,
+      ...withBaseUrl(existingConfig, baseUrl),
       apiKey: resolvedApiKey,
     });
     const model = await chooseProviderModel(
@@ -1512,6 +1506,23 @@ async function configure(existingConfig?: MercuryConfig): Promise<void> {
           config.providers.runcrate.apiKey = result.apiKey;
           config.providers.runcrate.model = result.model;
           config.providers.runcrate.enabled = true;
+        }
+        continue;
+      }
+
+      if (provider === 'cloudgpu') {
+        const mask = isReconfig && config.providers.cloudgpu.apiKey ? ` [${maskKey(config.providers.cloudgpu.apiKey)}]` : '';
+        const result = await promptApiKeyWithModelSelection(
+          config,
+          'cloudgpu',
+          'CloudGPU',
+          chalk.white(`  CloudGPU API key${mask}${isReconfig ? '' : ' (Enter to skip)'}: `),
+          isReconfig,
+        );
+        if (!result.skipped && result.apiKey && result.model) {
+          config.providers.cloudgpu.apiKey = result.apiKey;
+          config.providers.cloudgpu.model = result.model;
+          config.providers.cloudgpu.enabled = true;
         }
         continue;
       }
@@ -2721,6 +2732,7 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
   // terminal attached to a live daemon must not start every stdio server twice.
   const mcpManager = daemonOwnsRuntime ? undefined : new McpManager(mcpConfig.servers, {
     gate: (request) => capabilities.permissions.checkMcpTool(request),
+    resourceGate: (request) => capabilities.permissions.checkMcpResource(request),
   });
   if (mcpManager) {
     capabilities.attachMcp(mcpManager);
@@ -2739,6 +2751,12 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
 
   agent.setSkillLoader(skillLoader);
   agent.terminalOnly = daemonOwnsRuntime;
+  if (!daemonOwnsRuntime) {
+    configureEventTriggers(loadEventTriggers(), {
+      accept: (input) => agent.acceptEventTrigger(input),
+      status: (triggerId, deliveryId) => agent.getEventTriggerDelivery(triggerId, deliveryId),
+    });
+  }
 
   if (supervisor) {
     agent.setSupervisor(supervisor);
@@ -3343,7 +3361,7 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
           }
           // Same semantics as the local /stop fast-path command: abort the
           // foreground task, cancel its work-ledger entry, halt sub-agents.
-          const note = await agent.stopAllWork('stopped');
+          const note = await agent.stopSessionWork(suppliedSessionId);
           cloudClient!.sendStream({
             conversationId,
             sessionId: suppliedSessionId,
@@ -3551,7 +3569,7 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
   // Settings-free skill builder: the default model writes a skill from the owner's description.
   setSkillBuilder({ provider: () => providers.getDefault(), tools: () => Object.keys(capabilities.getTools()).sort() });
   setCloudReload(() => agent.reloadProviders());
-  setWebStop(() => agent.stopAllWork('stopped'));
+  setWebStop((sessionId) => agent.stopSessionWork(sessionId));
   setWebSessionBusy((sessionId) => agent.isBusyWith(sessionId));
   setWebQueueControls({ state: (id) => agent.queueStateFor(id), prioritize: (id) => agent.prioritize(id) });
   setWebResearchControls({
@@ -3772,7 +3790,7 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
     setWebSpotify(spotifyClient);
   }
 
-  capabilities.permissions.onAsk(async (prompt: string) => {
+  capabilities.permissions.onAsk(async (prompt: string, options) => {
     const channelType = capabilities.permissions.getCurrentChannelType();
     const { channelId } = capabilities.getChannelContext();
     if (channelType === 'telegram' && tgChannel) {
@@ -3782,7 +3800,7 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
       return (channels.get('signal') as SignalChannel).askPermission(prompt, channelId);
     }
     if (channelType === 'web' && webChannel) {
-      return webChannel.askPermission(prompt, channelId);
+      return webChannel.askPermission(prompt, channelId, options);
     }
     // Any other channel that can ask (plugin channels such as WhatsApp).
     const asking = channels.get(channelType as Parameters<typeof channels.get>[0]) as { askPermission?: (p: string, id?: string) => Promise<string> } | undefined;

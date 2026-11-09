@@ -27,8 +27,13 @@
   <a href="https://mercuryagent.sh/docs">Docs</a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a> ·
-  <a href="https://discord.gg/5emMpMJy5J">Discord</a> ·
-  <a href="README.zh-CN.md">简体中文</a>
+  <a href="https://discord.gg/5emMpMJy5J">Discord</a>
+</p>
+
+<p align="center">
+  English ·
+  <a href="README.zh-CN.md">简体中文</a> ·
+  <a href="README.ja.md">日本語</a>
 </p>
 
 ---
@@ -67,6 +72,8 @@ Most agents can read files, run commands and fetch pages. The differences are in
 **It asks before it acts.** File access is scoped per folder, shell commands pass through a blocklist and an approval step, and outbound requests are checked against private address ranges. You choose per session whether Mercury asks every time or runs freely, and members of a shared Telegram or Discord channel cannot widen their own access.
 
 **It remembers you without being told to.** After each conversation Mercury extracts a few durable facts (preferences, goals, projects, decisions) with confidence scores, resolves conflicts with what it already knows, and recalls the relevant ones before the next answer. Everything lives in a SQLite file under `~/.mercury`, and `/memory` lets you inspect, pause or clear it.
+
+**Web and desktop chats can work in parallel.** Up to two chats can run at once, with separate working directories, approvals and Stop controls. Messages within a conversation stay ordered. Code sessions using overlapping project folders wait for each other; terminal, scheduled and global command turns remain exclusive. A stopped turn keeps its slot until its tools finish unwinding.
 
 **It respects a budget.** A daily token budget is enforced on every turn. When usage climbs, Token Saver mode trims context and can route routine work to a cheaper model. `/budget` shows where you stand.
 
@@ -204,6 +211,7 @@ Design notes: [BOTS-ARCHITECTURE.md](BOTS-ARCHITECTURE.md).
 - **Shell:** a blocklist that cannot be overridden (`sudo`, `rm -rf /` and its variants), plus approval for everything outside your allowed scopes.
 - **Files:** read and write scopes per folder, per channel and per role.
 - **Network:** `fetch_url` blocks private address ranges and caps response sizes.
+- **Optional browser reader:** [isolated public-page rendering](docs/isolated-browser.md) uses an installed browser with a separate temporary profile per chat, approved navigation, bounded snapshots and a strict network guard. Page actions and JavaScript are disabled; no browser engine is bundled.
 - **Modes:** *Ask Me* or *Allow All* per session, changeable with `/permissions`.
 - **Secrets:** API keys live in `~/.mercury/.env`, logs redact them, and the dashboard password is random on first run.
 
@@ -243,6 +251,7 @@ Mercury tries your default provider first and falls back to the others if it fai
 | Grok (xAI) | `grok-4` | `GROK_API_KEY` |
 | Atlas Cloud | `qwen/qwen3.5-flash` | `ATLASCLOUD_API_KEY` |
 | Runcrate | `deepseek-ai/DeepSeek-V4.1-Flash` | `RUNCRATE_API_KEY` |
+| CloudGPU | `deepseek-v4.1-flash` | `CLOUDGPU_API_KEY` |
 | AI/ML API | `anthropic/claude-sonnet-4.6` | `AIMLAPI_API_KEY` |
 | MiMo (Xiaomi) | `mimo-v2.5-pro` | `MIMO_API_KEY` |
 | Ollama Cloud | `gpt-oss:120b` | `OLLAMA_CLOUD_API_KEY` |
@@ -251,6 +260,18 @@ Mercury tries your default provider first and falls back to the others if it fai
 | OpenAI-compatible | any | `OPENAI_COMPAT_API_KEY` and `OPENAI_COMPAT_BASE_URL` |
 
 LiteLLM and GitHub Copilot endpoints are also available through `mercury doctor`.
+
+A server behind a reverse proxy with a username and password (for example Ollama behind nginx) works with Ollama Local, OpenAI-compatible, LM Studio, LiteLLM and Atomic Chat. Set `username` and `password` on the provider in `mercury.yaml`; Mercury then sends `Authorization: Basic ...` instead of the API key. Use `https://` for any server that is not on your own machine. Behind Cloudflare, set SSL/TLS mode to Full (strict): in Flexible mode the hop from Cloudflare to your server is plain http.
+
+```yaml
+providers:
+  ollamaLocal:
+    baseUrl: https://ollama.example.com/v1
+    model: gemma4:12b
+    username: me
+    password: my-password
+    enabled: true
+```
 
 </details>
 
@@ -317,7 +338,7 @@ These run locally and do not use tokens. `/help` lists everything.
 | Web | `fetch_url` |
 | Skills | `install_skill`, `list_skills`, `use_skill` |
 | Scheduler | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` |
-| Memory | `save_memory`, `search_memory` |
+| Memory | `save_memory`, `search_memory`; saved conversations: `search_sessions`, `read_session` |
 | Agents | `delegate_task`, `list_agents`, `stop_agent`, `dispatch_bot` |
 | Interaction | `ask_user`, `update_plan`, `send_message`, `budget_status` |
 | Spotify | search, playback, queue, devices, playlists and more (when connected) |

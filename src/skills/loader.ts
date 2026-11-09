@@ -24,7 +24,8 @@ const SKILL_FILE = 'SKILL.md';
 const DISABLED_FILE = '.disabled';
 
 function parseSkillMd(content: string): { meta: SkillMeta; instructions: string } | null {
-  const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+  // Consume the complete delimiter newline so YAML never ends in a bare CR.
+  const fmMatch = content.match(/^---\s*\n([\s\S]*?)\r?\n---\s*\n([\s\S]*)$/);
   if (!fmMatch) return null;
 
   try {

@@ -12,6 +12,7 @@ import {
   Check,
   X,
   Zap,
+  Paperclip,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
@@ -21,7 +22,7 @@ import { Progress } from "@/components/ui/progress";
 import { useChatStore } from "@/stores/chat";
 import { useSSE } from "@/hooks/useSSE";
 import api from "@/lib/api";
-import type { ChatMessage, ChatThread } from "@/lib/api";
+import type { ChatMessage, ChatThread, InlineChatAttachment } from "@/lib/api";
 
 import { ThreadList } from "@/components/chat/ThreadList";
 import { WorkspacePanel } from "@/components/chat/WorkspacePanel";
@@ -289,13 +290,17 @@ function ChatInput({
   onSend,
   disabled,
 }: {
-  onSend: (text: string) => void;
+  onSend: (text: string, files: InlineChatAttachment[]) => Promise<boolean>;
   disabled: boolean;
 }) {
   const [text, setText] = useState("");
   const [showSlash, setShowSlash] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const filePicker = useRef<HTMLInputElement>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Compute filtered commands for index bounds
   const slashFilter = showSlash ? text.split("\n")[0] : "";
@@ -303,15 +308,44 @@ function ChatInput({
     c.command.startsWith(slashFilter.toLowerCase())
   );
 
-  function handleSubmit() {
-    const trimmed = text.trim();
-    if (!trimmed || disabled) return;
-    setShowSlash(false);
-    onSend(trimmed);
-    setText("");
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
+  function addFiles(incoming: FileList) {
+    setError(null);
+    const accepted: File[] = [];
+    for (const file of Array.from(incoming)) {
+      const textFile = /\.(txt|md|markdown)$/i.test(file.name);
+      const image = /^image\/(png|jpeg|webp|gif)$/.test(file.type);
+      const pdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+      if (!textFile && !image && !pdf) { setError(`${file.name}: attach an image, PDF, TXT or Markdown file.`); continue; }
+      const limit = textFile ? 256 * 1024 : image ? 8 * 1024 * 1024 : 15 * 1024 * 1024;
+      if (file.size > limit) { setError(`${file.name}: the limit is ${textFile ? "256 KiB" : `${limit / 1048576} MB`}.`); continue; }
+      accepted.push(file);
     }
+    setFiles(current => {
+      if (current.length + accepted.length > 4) setError("Up to 4 files per message.");
+      return [...current, ...accepted].slice(0, 4);
+    });
+  }
+
+  async function handleSubmit() {
+    const trimmed = text.trim();
+    if ((!trimmed && files.length === 0) || disabled || sending) return;
+    setShowSlash(false);
+    setSending(true);
+    setError(null);
+    try {
+      const attachments = await Promise.all(files.map(file => new Promise<InlineChatAttachment>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({ name: file.name, mime: file.type, data: String(reader.result).split(",", 2)[1] });
+        reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+        reader.readAsDataURL(file);
+      })));
+      if (await onSend(trimmed, attachments)) {
+        setText("");
+        setFiles([]);
+        if (textareaRef.current) textareaRef.current.style.height = "auto";
+      }
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not read the attached files."); }
+    finally { setSending(false); }
   }
 
   function selectSlashCommand(cmd: string) {
@@ -379,8 +413,18 @@ function ChatInput({
   }
 
   return (
-    <div className="border-t border-border bg-background/80 backdrop-blur-xl px-4 py-3">
+    <div className="border-t border-border bg-background/80 backdrop-blur-xl px-4 py-3"
+      onDragOver={e => e.preventDefault()}
+      onDrop={e => { e.preventDefault(); if (!disabled && !sending) addFiles(e.dataTransfer.files); }}>
+      {files.length > 0 && <div className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2">
+        {files.map((file, index) => <span key={index} className="flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs">
+          {file.name}<button aria-label={`Remove ${file.name}`} disabled={sending} onClick={() => setFiles(current => current.filter((_, i) => i !== index))}><X className="h-3 w-3" /></button>
+        </span>)}
+      </div>}
+      {error && <p role="alert" className="mx-auto mb-2 max-w-3xl text-xs text-destructive">{error}</p>}
       <div className="mx-auto flex max-w-3xl items-end gap-2">
+        <Button size="icon" variant="ghost" disabled={disabled || sending} title="Attach images, PDFs, TXT or Markdown" aria-label="Attach files" onClick={() => filePicker.current?.click()}><Paperclip className="h-4 w-4" /></Button>
+        <input ref={filePicker} type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,.txt,.md,.markdown" multiple hidden onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }} />
         <div className="relative flex-1">
           <AnimatePresence>
             {showSlash && filteredCommands.length > 0 && (
@@ -399,6 +443,8 @@ function ChatInput({
               handleInput();
             }}
             onKeyDown={handleKeyDown}
+            disabled={sending}
+            onPaste={e => { if (e.clipboardData.files.length) { e.preventDefault(); if (!disabled && !sending) addFiles(e.clipboardData.files); } }}
             onBlur={() => {
               // Delay to allow click on menu item
               setTimeout(() => setShowSlash(false), 200);
@@ -415,7 +461,8 @@ function ChatInput({
         </div>
         <Button
           size="icon"
-          disabled={disabled || !text.trim()}
+          aria-label="Send message"
+          disabled={disabled || sending || (!text.trim() && files.length === 0)}
           onClick={handleSubmit}
           className="h-10 w-10 shrink-0 rounded-xl"
         >
@@ -482,64 +529,90 @@ export function ChatPage() {
       clearMessages();
       return;
     }
+    let cancelled = false;
+    const eventVersion = useChatStore.getState().eventVersion;
+    void api.chat.threads.queue(activeThreadId).then((queue) => {
+      const state = useChatStore.getState();
+      if (!cancelled && state.activeThreadId === activeThreadId && state.eventVersion === eventVersion) {
+        state.setWaiting(queue.state === "running" || queue.state === "queued");
+      }
+    }).catch(() => { /* older runtimes may not report running turns */ });
     (async () => {
       try {
         const thread = await api.chat.threads.get(activeThreadId);
+        if (cancelled || useChatStore.getState().activeThreadId !== activeThreadId || useChatStore.getState().eventVersion !== eventVersion) return;
         clearMessages();
         if (thread.messages && thread.messages.length > 0) {
           thread.messages.forEach((m) => addMessage(m));
         }
       } catch {
-        // Thread doesn't exist yet (new thread) — just clear
-        clearMessages();
+        // Thread doesn't exist yet (new thread) — just clear.
+        if (!cancelled && useChatStore.getState().activeThreadId === activeThreadId && useChatStore.getState().eventVersion === eventVersion) clearMessages();
       }
     })();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadId]);
 
-  async function handleSend(content: string) {
+  async function handleSend(content: string, attachments: InlineChatAttachment[]): Promise<boolean> {
     // Ensure we have a thread ID — create one if needed
     let threadId = activeThreadId;
     if (!threadId) {
       const thread = await api.chat.threads.create();
       threadId = thread.id;
-      setActiveThread(threadId);
+      if (useChatStore.getState().activeThreadId === activeThreadId) setActiveThread(threadId);
     }
+    const selected = () => useChatStore.getState().activeThreadId === threadId;
 
     // Optimistic user message
-    addMessage({
-      id: crypto.randomUUID(),
+    const messageId = crypto.randomUUID();
+    if (selected()) addMessage({
+      id: messageId,
       role: "user",
-      content,
+      content: content || `(Attached: ${attachments.map(a => a.name).join(', ')})`,
+      attachments: attachments.map(a => ({ name: a.name, mime: a.mime, kind: a.mime.startsWith('image/') ? 'image' : 'document' })),
       timestamp: new Date().toISOString(),
     });
 
     // Immediately show waiting state
-    setWaiting(true);
+    if (selected()) {
+      useChatStore.setState((state) => ({ eventVersion: state.eventVersion + 1 }));
+      setWaiting(true);
+    }
 
     try {
-      const res = await api.chat.send(content, threadId);
+      const res = await api.chat.send(content, threadId, attachments);
+      if (selected()) useChatStore.setState(state => ({ messages: state.messages.map(message => message.id === messageId ? { ...message, attachments: res.attachments } : message) }));
       // A client-made "web:..." id is rebound to a server session id. Follow
       // it, or the SSE stream stays on the old id and never receives this
       // turn's replies or permission prompts.
-      if (res.sessionId && res.sessionId !== threadId) {
+      if (selected() && res.sessionId && res.sessionId !== threadId) {
         setActiveThread(res.sessionId);
         navigate(`/chat/${res.sessionId}`, { replace: true });
       }
       bumpThreadVersion();
       // Reload threads in background to pick up new thread
       reloadThreads();
-    } catch {
+      return true;
+    } catch (err) {
+      if (!selected()) return false;
       setWaiting(false);
       clearStreaming();
       resetSteps();
       addMessage({
         id: crypto.randomUUID(),
         role: "system",
-        content: "Failed to send message. Please try again.",
+        content: err instanceof Error ? err.message : "Failed to send message. Please try again.",
         timestamp: new Date().toISOString(),
       });
+      return false;
     }
+  }
+
+  async function handleRenameThread(id: string, title: string) {
+    const renamed = await api.chat.threads.rename(id, title);
+    const { threads, setThreads } = useChatStore.getState();
+    setThreads(threads.map(thread => thread.id === renamed.id ? { ...thread, title: renamed.title } : thread));
   }
 
   async function handleDeleteThread(id: string) {
@@ -603,6 +676,7 @@ export function ChatPage() {
             activeThreadId={activeThreadId}
             onSelect={handleSelectThread}
             onDelete={handleDeleteThread}
+            onRename={handleRenameThread}
             onNew={() => handleNewThread()}
             onExport={handleExportThread}
           />
@@ -635,6 +709,7 @@ export function ChatPage() {
                   setSidebarOpen(false);
                 }}
                 onDelete={handleDeleteThread}
+                onRename={handleRenameThread}
                 onNew={() => {
                   handleNewThread();
                   setSidebarOpen(false);
@@ -796,7 +871,7 @@ export function ChatPage() {
         )}
 
         {/* Chat input */}
-        <ChatInput onSend={handleSend} disabled={isBusy} />
+        <ChatInput key={activeThreadId ?? "new"} onSend={handleSend} disabled={isBusy} />
       </div>
 
       {/* ── Workspace Panel ── */}

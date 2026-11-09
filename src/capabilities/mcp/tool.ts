@@ -1,6 +1,7 @@
 import { tool, type Schema, type Tool } from 'ai';
 import { redactSecrets } from '../../utils/redact.js';
-import { callResultToText, type McpCallResultLike } from './result.js';
+import { captureToolImageState, clearToolImages, holdImages, toolOutputWithImages } from '../tool-images.js';
+import { callResultToContent, type McpCallResultLike } from './result.js';
 import type { McpGate } from './types.js';
 
 export const MAX_DESCRIPTION_CHARS = 1024;
@@ -33,10 +34,14 @@ function errorMessage(err: unknown): string {
 
 export function buildMcpTool(options: BuildMcpToolOptions): Tool {
   const { serverId, toolName, exposedName, autoApprove, gate, call } = options;
+  const imageState = captureToolImageState();
+  const imageKey = (callId: string) => `mcp:${exposedName}:${callId}`;
   return tool({
     description: describeMcpTool(serverId, options.description),
     inputSchema: options.inputSchema,
-    execute: async (args: Record<string, unknown>, { abortSignal }): Promise<string> => {
+    toModelOutput: ({ toolCallId, output }) => toolOutputWithImages(imageKey(toolCallId), String(output), imageState),
+    execute: async (args: Record<string, unknown>, { abortSignal, toolCallId }): Promise<string> => {
+      clearToolImages(imageKey(toolCallId), imageState);
       let verdict;
       try {
         verdict = await gate({ serverId, toolName, exposedName, args, autoApprove });
@@ -47,7 +52,9 @@ export function buildMcpTool(options: BuildMcpToolOptions): Tool {
         return `Error: ${verdict.reason ?? `MCP ${serverId}/${toolName} is not permitted`}`;
       }
       try {
-        return callResultToText(await call(toolName, args ?? {}, abortSignal));
+        const content = callResultToContent(await call(toolName, args ?? {}, abortSignal));
+        holdImages(imageKey(toolCallId), content.images, imageState);
+        return content.text;
       } catch (err) {
         return `Error: MCP ${serverId}/${toolName} failed: ${redactSecrets(errorMessage(err))}`;
       }

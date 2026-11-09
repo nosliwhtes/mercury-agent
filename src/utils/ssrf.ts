@@ -15,7 +15,7 @@
 
 import { lookup } from 'node:dns';
 import { isIP } from 'node:net';
-import { Agent } from 'undici';
+import { Agent, fetch as undiciFetch } from 'undici';
 
 const DEFAULT_HEADERS = {
   'User-Agent': 'Mercury-Agent/0.1.0',
@@ -167,64 +167,6 @@ export async function assertFetchableTarget(rawUrl: string): Promise<URL> {
   return (await resolveAndValidate(rawUrl)).url;
 }
 
-// Pinned lookups for the current in-flight requests, keyed by hostname. The
-// guarded agent consults this table so its connection goes to the exact
-// address that was validated instead of re-resolving.
-const pinnedByHost = new Map<string, PinnedAddress>();
-
-const guardedAgent = new Agent({
-  connect: {
-    // undici types this hook against its internal LookupFunction; the shape
-    // below matches what it invokes at connect time.
-    lookup: ((hostname: string, options: { all?: boolean } | undefined, callback: (...args: unknown[]) => void) => {
-      const pinned = pinnedByHost.get(hostname);
-      if (!pinned) {
-        (lookup as unknown as (host: string, opts: unknown, cb: unknown) => void)(hostname, options, callback);
-        return;
-      }
-      if (options?.all) callback(null, [{ address: pinned.address, family: pinned.family }]);
-      else callback(null, pinned.address, pinned.family);
-    }) as never,
-  },
-});
-
-type FetchInitWithDispatcher = RequestInit & { dispatcher?: unknown };
-
-/** Fetch with SSRF validation on the initial URL AND every redirect hop. */
-export async function guardedFetch(rawUrl: string, signal: AbortSignal, headers?: Record<string, string>): Promise<Response> {
-  let target = rawUrl;
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const { url, pinned } = await resolveAndValidate(target);
-    const host = url.hostname;
-    if (pinned) pinnedByHost.set(host, pinned);
-    try {
-      const init: FetchInitWithDispatcher = {
-        signal,
-        redirect: 'manual',
-        headers: headers ?? DEFAULT_HEADERS,
-        dispatcher: guardedAgent,
-      };
-      const resp = await fetch(url, init);
-      if (resp.status >= 300 && resp.status < 400) {
-        const location = resp.headers.get('location');
-        if (location) {
-          try { void resp.body?.cancel(); } catch { /* best effort */ }
-          target = new URL(location, url).href;
-          continue;
-        }
-      }
-      return resp;
-    } finally {
-      if (pinned && pinnedByHost.get(host)?.address === pinned.address) {
-        pinnedByHost.delete(host);
-      }
-    }
-  }
-  throw new Error('Blocked: too many redirects');
-}
-
-export type GuardedFetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
-
 export class PinTable {
   private readonly pins = new Map<string, { pin: { address: string; family: number }; count: number }>();
 
@@ -244,6 +186,73 @@ export class PinTable {
     return this.pins.get(host)?.pin;
   }
 }
+
+// Pinned lookups for the current in-flight requests, keyed by hostname. The
+// guarded agent consults this table so its connection goes to the exact
+// address that was validated instead of re-resolving. Retain a host's pin
+// until every overlapping request has released it.
+const pinnedByHost = new PinTable();
+
+const guardedAgent = new Agent({
+  connect: {
+    // undici types this hook against its internal LookupFunction; the shape
+    // below matches what it invokes at connect time.
+    lookup: ((hostname: string, options: { all?: boolean } | undefined, callback: (...args: unknown[]) => void) => {
+      const pinned = pinnedByHost.get(hostname);
+      if (!pinned) {
+        (lookup as unknown as (host: string, opts: unknown, cb: unknown) => void)(hostname, options, callback);
+        return;
+      }
+      if (options?.all) callback(null, [{ address: pinned.address, family: pinned.family }]);
+      else callback(null, pinned.address, pinned.family);
+    }) as never,
+  },
+});
+
+type FetchInitWithDispatcher = RequestInit & { dispatcher: Agent };
+
+// A dispatcher and fetch must speak the same Undici protocol. Node's bundled
+// fetch can be newer than our dependency (Node 26 uses the new handler API),
+// so passing this package's Agent to global fetch fails before any request.
+// Keep the existing web Fetch API types at the boundary: the package and Node
+// ship separately versioned declarations for the same request/response APIs.
+const fetchWithDispatcher = undiciFetch as unknown as (
+  input: URL,
+  init: FetchInitWithDispatcher,
+) => Promise<Response>;
+
+/** Fetch with SSRF validation on the initial URL AND every redirect hop. */
+export async function guardedFetch(rawUrl: string, signal: AbortSignal, headers?: Record<string, string>): Promise<Response> {
+  let target = rawUrl;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const { url, pinned } = await resolveAndValidate(target);
+    const host = url.hostname;
+    if (pinned) pinnedByHost.acquire(host, pinned);
+    try {
+      const init: FetchInitWithDispatcher = {
+        signal,
+        redirect: 'manual',
+        headers: headers ?? DEFAULT_HEADERS,
+        dispatcher: guardedAgent,
+      };
+      const resp = await fetchWithDispatcher(url, init);
+      if (resp.status >= 300 && resp.status < 400) {
+        const location = resp.headers.get('location');
+        if (location) {
+          try { void resp.body?.cancel(); } catch { /* best effort */ }
+          target = new URL(location, url).href;
+          continue;
+        }
+      }
+      return resp;
+    } finally {
+      if (pinned) pinnedByHost.release(host);
+    }
+  }
+  throw new Error('Blocked: too many redirects');
+}
+
+export type GuardedFetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 const guardedFetchPins = new PinTable();
 
@@ -269,7 +278,7 @@ export function createGuardedFetch(options: { allowPrivate?: boolean; privateHin
     if (pinned) guardedFetchPins.acquire(host, pinned);
     try {
       const guardedInit: FetchInitWithDispatcher = { ...init, redirect: 'manual', dispatcher: guardedFetchAgent };
-      return await fetch(url, guardedInit);
+      return await fetchWithDispatcher(url, guardedInit);
     } finally {
       if (pinned) guardedFetchPins.release(host);
     }
