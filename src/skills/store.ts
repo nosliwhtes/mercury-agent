@@ -366,7 +366,8 @@ interface ParsedFrontmatter {
 }
 
 function parseFrontmatter(body: string): ParsedFrontmatter {
-  const m = body.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
+  // Consume the complete delimiter newline so YAML never ends in a bare CR.
+  const m = body.match(/^---\s*\n([\s\S]*?)\r?\n---\s*\n?/);
   if (!m) return {};
   try {
     const obj = parseYaml(m[1]) as Record<string, unknown>;

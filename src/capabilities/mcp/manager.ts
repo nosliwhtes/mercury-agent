@@ -40,7 +40,7 @@ interface DescribedTool {
 }
 
 interface ToolEntry extends McpToolStatus {
-  tool?: Tool;
+  buildTool?: () => Tool;
 }
 
 interface ServerEntry {
@@ -219,7 +219,7 @@ export class McpManager {
     for (const entry of this.servers.values()) {
       if (entry.state !== 'connected' && entry.state !== 'reconnecting') continue;
       for (const tool of entry.tools) {
-        if (tool.tool) tools[tool.exposedName] = tool.tool;
+        if (tool.buildTool) tools[tool.exposedName] = tool.buildTool();
       }
     }
     if (this.options.resourceGate && this.resourceServers().length) {
@@ -439,9 +439,9 @@ export class McpManager {
       if (status.skipped) {
         logger.warn({ server: entry.id, tool: status.name, reason: status.skipped }, 'MCP tool skipped');
       }
-      const tool =
+      const buildTool =
         status.allowed && schema
-          ? buildMcpTool({
+          ? () => buildMcpTool({
               serverId: entry.id,
               toolName: status.name,
               exposedName: status.exposedName,
@@ -452,7 +452,7 @@ export class McpManager {
               call: (name, args, signal) => this.call(entry, name, args, signal),
             })
           : undefined;
-      return { ...status, tool };
+      return { ...status, buildTool };
     });
     this.options.onToolsChanged?.();
   }

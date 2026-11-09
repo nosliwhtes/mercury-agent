@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { makeContext } from '../capabilities/permission-context.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,13 +27,25 @@ function harness(fail = false) {
     currentWorkKey: string;
     handleScheduledTask(manifest: ScheduledTaskManifest, runId: string): Promise<'queued'>;
     processQueue(): Promise<void>;
+    activeTurns: Map<string, { done: Promise<void> }>;
   };
   const scheduler = new Scheduler({ heartbeat: { intervalMinutes: 30 } } as MercuryConfig,
     (manifest, runId) => internal.handleScheduledTask(manifest, runId));
   const effect = vi.fn();
+  const context = makeContext({});
   Object.assign(agent, {
     scheduler, workLedger, messageQueue: [], queuedWorkKeys: new Set(), processing: false, running: false,
     currentMessage: null, currentWorkKey: null,
+    activeTurns: new Map(), sessionPermissions: new Map(), sessionCwds: new Map(),
+    turnStorage: new AsyncLocalStorage(),
+    capabilities: {
+      permissions: {
+        sessionContext: () => context, currentContext: () => context,
+        withContext: (_context: unknown, run: () => Promise<void>) => run(),
+      },
+      getDefaultCwd: () => process.cwd(), getCwd: () => process.cwd(),
+      withExecutionContext: (run: () => Promise<void>) => run(),
+    },
     channels: { get: () => undefined, getNotificationChannel: () => undefined },
     lifecycle: { is: () => true },
     announceQueue: () => {},
@@ -55,6 +69,7 @@ describe('scheduled main-agent dispatch', () => {
     expect(effect).not.toHaveBeenCalled();
     Object.assign(agent, { running: true });
     await internal.processQueue();
+    await Promise.all([...internal.activeTurns.values()].map((turn) => turn.done));
     expect(effect).toHaveBeenCalledOnce();
     expect(scheduler.getManifest('scheduled')?.lastRun?.status).toBe(fail ? 'failed' : 'completed');
     scheduler.stopAll();

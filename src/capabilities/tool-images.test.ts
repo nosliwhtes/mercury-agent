@@ -1,6 +1,8 @@
+import { withToolExecutionScope } from './tool-execution-scope.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   MAX_TOOL_IMAGES,
+  captureToolImageState,
   holdImages,
   resetToolImages,
   setToolImagesAllowed,
@@ -35,8 +37,8 @@ describe('tool images', () => {
   });
 
   it('sends a note instead when the model cannot take images', () => {
-    holdImages('call-1', [png]);
     setToolImagesAllowed(false);
+    holdImages('call-1', [png]);
     const output = toolOutputWithImages('call-1', 'shot');
     expect(output.type).toBe('text');
     expect(output.value).toMatch(/^shot\n\(The current model can't view images/);
@@ -54,4 +56,42 @@ describe('tool images', () => {
     expect(toolOutputWithImages('call-0', 'old').type).toBe('text');
     expect(toolOutputWithImages('call-32', 'new').type).toBe('content');
   });
+});
+
+
+it('isolates provider attempts and retains captured output for the old attempt', () => {
+  setToolImagesAllowed(true);
+  const first = captureToolImageState();
+  holdImages('same-id', [png], first);
+  setToolImagesAllowed(false);
+  expect(toolOutputWithImages('same-id', 'new').type).toBe('text');
+  expect(toolOutputWithImages('same-id', 'old', first).type).toBe('content');
+});
+
+it('clears stale images when a call id is reused without an image', () => {
+  holdImages('same-id', [png]);
+  holdImages('same-id', []);
+  expect(toolOutputWithImages('same-id', 'plain').type).toBe('text');
+});
+
+
+it('isolates overlapping turns even when their image call ids match', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const first = withToolExecutionScope(async () => {
+    setToolImagesAllowed(true);
+    holdImages('same-id', [png]);
+    const state = captureToolImageState();
+    await gate;
+    return () => toolOutputWithImages('same-id', 'first', state);
+  });
+  const second = await withToolExecutionScope(async () => {
+    setToolImagesAllowed(false);
+    holdImages('same-id', [{ ...png, data: 'second' }]);
+    const state = captureToolImageState();
+    release();
+    return () => toolOutputWithImages('same-id', 'second', state);
+  });
+  expect((await first)().type).toBe('content');
+  expect(second().type).toBe('text');
 });

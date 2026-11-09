@@ -1,3 +1,4 @@
+import { withToolExecutionScope } from '../tool-execution-scope.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import type { Tool } from 'ai';
@@ -97,7 +98,9 @@ describe('McpManager', () => {
 
     setToolImagesAllowed(false);
     try {
-      const noted = await tool!.toModelOutput!({ toolCallId: 'call-1', input: {}, output: text });
+      const textOnlyTool = m.getTools().mcp__fx__image!;
+      const textOnlyOutput = await run(textOnlyTool, {});
+      const noted = await textOnlyTool.toModelOutput!({ toolCallId: 'call-1', input: {}, output: textOnlyOutput });
       expect(noted).toMatchObject({ type: 'text' });
       expect(JSON.stringify(noted)).toMatch(/can't view images/);
     } finally {
@@ -220,3 +223,17 @@ describe('probeMcpServer', () => {
     expect(status.error).toBeTruthy();
   }, 20_000);
 });
+
+it('binds cached MCP definitions to each provider attempt and concurrent turn', async () => {
+  const m = manager({ fx: fixture({ tools: { allow: ['image'] } }) });
+  await m.connectAll();
+  const execute = async (allowed: boolean) => withToolExecutionScope(async () => {
+    setToolImagesAllowed(allowed);
+    const tool = m.getTools().mcp__fx__image!;
+    const output = await run(tool, {});
+    return () => tool.toModelOutput!({ toolCallId: 'call-1', input: {}, output });
+  });
+  const [first, second] = await Promise.all([execute(true), execute(false)]);
+  expect(await first()).toMatchObject({ type: 'content' });
+  expect(await second()).toMatchObject({ type: 'text', value: expect.stringContaining("can't view images") });
+}, 20_000);

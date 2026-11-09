@@ -17,6 +17,8 @@ import {
   TOOL_IMAGE_TYPES,
   attachedImagesNote,
   holdImages,
+  captureToolImageState,
+  clearToolImages,
   resetToolImages,
   setToolImagesAllowed,
   toolImagesAllowed,
@@ -24,6 +26,7 @@ import {
   usableImages,
   type ToolImage,
 } from '../capabilities/tool-images.js';
+import { trackToolExecution } from '../capabilities/tool-execution-scope.js';
 import { logger } from '../utils/logger.js';
 
 export interface LiveTool {
@@ -169,17 +172,30 @@ function describeArgs(args: Record<string, unknown>): string {
  */
 function wrap(t: LiveTool, permissions: PermissionManager): Tool {
   const full = pluginToolName(t.pluginId, t.name);
+  const state = captureToolImageState();
+  const imageKey = (callId: string) => `${full}:${callId}`;
   return tool<Record<string, unknown>, string>({
     description: `[Plugin: ${t.pluginName}] ${t.description}`,
     inputSchema: jsonSchema<Record<string, unknown>>(t.inputSchema as Parameters<typeof jsonSchema>[0]),
     toModelOutput: ({ toolCallId, output }) =>
-      toolOutputWithImages(toolCallId, typeof output === 'string' ? output : stringifyResult(output)),
+      toolOutputWithImages(imageKey(toolCallId), typeof output === 'string' ? output : stringifyResult(output), state),
     execute: async (input, options) => {
-      const args = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+      if (options?.toolCallId) clearToolImages(imageKey(options.toolCallId), state);
+      let args = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+      // Models sometimes fill the optional zoom with []. Optimus 0.5.1 treats
+      // that as a crop of a previous screenshot, so the first look fails and
+      // repeated attempts can trip the plugin circuit breaker. Empty means no
+      // crop; preserve real (including invalid nonempty) crops for the plugin.
+      if (t.pluginId === 'optimus' && t.name === 'look' && Array.isArray(args.zoom) && args.zoom.length === 0) {
+        args = { ...args };
+        delete args.zoom;
+      }
       if (!t.readOnly) {
         const approved = await permissions.approvePluginTool(full, `Run plugin tool ${t.pluginName} → ${t.name} with ${describeArgs(args)}`);
         if (!approved) return `Not run: the plugin tool ${full} was not approved.`;
       }
+      // Approval may have been pending when the user stopped this turn.
+      if (options?.abortSignal?.aborted) return `Not run: the plugin tool ${full} was cancelled.`;
       const ac = new AbortController();
       const onOuterAbort = () => ac.abort(new Error('cancelled'));
       options?.abortSignal?.addEventListener('abort', onOuterAbort, { once: true });
@@ -193,11 +209,12 @@ function wrap(t: LiveTool, permissions: PermissionManager): Tool {
         }, t.timeoutMs);
       });
       try {
-        const result = await Promise.race([Promise.resolve().then(() => t.invoke(args, ac.signal)), timeout]);
+        const invocation = trackToolExecution(Promise.resolve().then(() => t.invoke(args, ac.signal)));
+        const result = await Promise.race([invocation, timeout]);
         outcomeSink(t.pluginId, { ok: true });
         if (isToolContent(result)) {
           const images = usableImages(result.images);
-          holdImages(options?.toolCallId, images);
+          holdImages(options?.toolCallId ? imageKey(options.toolCallId) : undefined, images, state);
           return stringifyResult(`${result.text || 'Done.'}${attachedImagesNote(images.length)}`);
         }
         return stringifyResult(result);

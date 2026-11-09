@@ -494,6 +494,8 @@ describe('safe-read classifier: residual side-effect flags (table)', () => {
   }
 
   const requiresApproval: Array<[string, string]> = [
+    ['rg --pretty pattern src', 'recursive content search requires approval'],
+    ['rg -n pattern src', 'implicit recursion requires approval'],
     ['find . -fprint0 out.bin', 'find -fprint0 writes a file (the old \\b after -fprint stopped at the digit)'],
     ['find . -fprint0=out.bin', 'find -fprint0= form'],
     ['find . -fls out.txt', 'find -fls writes an ls-style listing'],
@@ -539,8 +541,6 @@ describe('safe-read classifier: residual side-effect flags (table)', () => {
     ['git log --format=%H', 'git log --format is read-only'],
     ['git diff --stat', 'plain git diff'],
     ['git diff --no-ext-diff', '--no-ext-diff disables the external diff'],
-    ['rg --pretty pattern src', 'rg --pretty is not --pre'],
-    ['rg -n pattern src', 'plain rg'],
     ['ls -o', 'ls has no write flags; -o is a listing format'],
     ['grep -o pattern file.txt', 'grep -o prints only matches'],
   ];
@@ -567,7 +567,7 @@ describe('argv lane (ADR-016)', () => {
 
   it('auto-approves through the argv lane and says so', async () => {
     const { permissions, ask } = makePermissions();
-    for (const cmd of ['ls', 'git status', 'git branch', 'pwd', 'cat "README.md"', 'grep -rn "a b" src']) {
+    for (const cmd of ['ls', 'git status', 'git branch', 'pwd', 'cat "README.md"', 'grep -n "a b" README.md']) {
       await expect(permissions.checkShellCommand(cmd)).resolves.toMatchObject({ allowed: true, lane: 'argv' });
     }
     expect(ask).not.toHaveBeenCalled();
