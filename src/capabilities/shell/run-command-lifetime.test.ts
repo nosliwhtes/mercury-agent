@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { minimalEnv } from './argv-lane.js';
 import { executeArgv, executeCommand } from './run-command.js';
 
 const roots: string[] = [];
@@ -74,44 +76,80 @@ describe.skipIf(process.platform === 'win32')('command termination lifetime', ()
 });
 
 describe('command output lifetime', () => {
-  it('collects descendant output after the direct child has exited', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'mercury-command-drain-'));
-    roots.push(root);
-    const script = join(root, 'drain.cjs');
-    writeFileSync(script, `
-      const { spawn } = require('node:child_process');
-      if (process.argv[2] !== 'descendant') {
-        const child = spawn(process.execPath, [__filename, 'descendant', String(process.pid)], {
-          stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
-        });
-        child.once('error', () => process.exit(1));
-        // In particular on Windows, do not tear down the parent before the
-        // descendant has initialized and flushed its inherited stdout handle.
-        child.once('message', () => process.exit(0));
-      } else {
-        const parentPid = Number(process.argv[3]);
-        const deadline = Date.now() + 5000;
-        const afterParentExit = () => {
-          try { process.kill(parentPid, 0); }
-          catch (error) {
-            if (error.code === 'ESRCH') {
-              process.stdout.write('tail after parent exit\\n');
-              return;
+  for (const runner of ['raw spawn', 'supervised', 'raw Windows kill-on-parent-exit control'] as const) {
+    it.skipIf(runner === 'raw Windows kill-on-parent-exit control' && process.platform !== 'win32')(`descendant output after direct child exit: ${runner}`, async () => {
+      const root = mkdtempSync(join(tmpdir(), 'mercury-command-drain-'));
+      roots.push(root);
+      const script = join(root, 'drain.cjs');
+      const descendantPid = join(root, 'descendant.pid');
+      const recordDescendant = () => {
+        if (existsSync(descendantPid)) pids.add(Number(readFileSync(descendantPid, 'utf8')));
+      };
+      writeFileSync(script, `
+        const { spawn } = require('node:child_process');
+        if (process.argv[2] !== 'descendant') {
+          const child = spawn(process.execPath, [__filename, 'descendant', String(process.pid)], {
+            stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+            // Node's bundled libuv assigns non-detached Windows children to a
+            // kill-on-parent-exit Job. This fixture must survive to test draining.
+            // https://github.com/nodejs/node/blob/v22.x/deps/uv/src/win/process.c
+            detached: process.platform === 'win32' && ${runner !== 'raw Windows kill-on-parent-exit control'},
+            windowsHide: true,
+          });
+          child.once('error', () => process.exit(1));
+          // In particular on Windows, do not tear down the parent before the
+          // descendant has initialized and flushed its inherited stdout handle.
+          child.once('message', () => process.exit(0));
+        } else {
+          require('node:fs').writeFileSync(${JSON.stringify(descendantPid)}, String(process.pid));
+          const parentPid = Number(process.argv[3]);
+          const deadline = Date.now() + 5000;
+          const afterParentExit = () => {
+            try { process.kill(parentPid, 0); }
+            catch (error) {
+              if (error.code === 'ESRCH') {
+                process.stdout.write('tail after parent exit\\n');
+                return;
+              }
+              throw error;
             }
-            throw error;
-          }
-          if (Date.now() >= deadline) throw new Error('Parent did not exit');
-          setTimeout(afterParentExit, 10);
-        };
-        process.once('disconnect', afterParentExit);
-        process.stdout.write('descendant ready\\n', () => process.send('ready'));
+            if (Date.now() >= deadline) throw new Error('Parent did not exit');
+            setTimeout(afterParentExit, 10);
+          };
+          process.once('disconnect', afterParentExit);
+          process.stdout.write('descendant ready\\n', () => process.send('ready'));
+        }
+      `);
+      const result = runner === 'supervised'
+        ? await executeArgv(process.execPath, [script], root, 10_000, { onActivity: recordDescendant })
+        : await new Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; aborted: boolean }>((resolve, reject) => {
+          // Raw Node control: no Mercury supervisor or cancellation hooks.
+          const child = spawn(process.execPath, [script], {
+            cwd: root, env: minimalEnv(), shell: false, windowsHide: true,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+          let stdout = '';
+          let stderr = '';
+          const timeout = setTimeout(() => { child.kill(); reject(new Error('Raw drain fixture timed out')); }, 10_000);
+          child.stdout.on('data', (chunk) => { stdout += chunk.toString(); recordDescendant(); });
+          child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+          child.once('error', (error) => { clearTimeout(timeout); reject(error); });
+          child.once('close', (exitCode) => {
+            clearTimeout(timeout);
+            resolve({ stdout, stderr, exitCode, timedOut: false, aborted: false });
+          });
+        });
+      expect(result).toMatchObject({ exitCode: 0, timedOut: false, aborted: false, stderr: '' });
+      expect(result.stdout).toContain('descendant ready');
+      if (runner === 'raw Windows kill-on-parent-exit control') {
+        // Negative control for libuv's own parent-owned Job: the descendant is
+        // killed, so no tail exists for either Node or Mercury to drain.
+        expect(result.stdout).not.toContain('tail after parent exit');
+      } else {
+        expect(result.stdout).toContain('tail after parent exit');
       }
-    `);
-    const result = await executeArgv(process.execPath, [script], root, 10_000);
-    expect(result).toMatchObject({ exitCode: 0, timedOut: false, aborted: false, stderr: '' });
-    expect(result.stdout).toContain('descendant ready');
-    expect(result.stdout).toContain('tail after parent exit');
-  }, 15_000);
+    }, 15_000);
+  }
 });
 
 describe.skipIf(process.platform !== 'win32')('native Windows command trees', () => {
