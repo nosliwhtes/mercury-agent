@@ -11,7 +11,7 @@
  *   4. resolves to an executable in a PATH pinned to system directories,
  *      resolved once per process and never read from `process.env.PATH`.
  *
- * Such a command is executed with `execFile(absBinary, argv, { env: minimal })`
+ * Such a command is executed with `spawn(absBinary, argv, { shell: false, env: minimal })`
  * — never through `sh -c` — so what was checked is exactly what runs.
  * Everything else (pipelines included) goes to the approval lane, which
  * prompts with the exact string and may still use the shell.
